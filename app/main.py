@@ -334,7 +334,16 @@ def relations(radius_km: float = Query(600, ge=1, le=2000), max_hours: int = Que
 @app.get("/api/v1/current-read")
 def current_read(as_of: datetime | None = None):
     all_events = active_store().read(as_of)
-    return make_read(all_events, find_relations(all_events))
+    relations = find_relations(all_events, radius_km=300, max_hours=48)
+    globe_data = globe_view(all_events, relations, limit=1, now=as_of)
+    return {
+        **globe_data["current_read"],
+        "counts": globe_data["counts"],
+        "relation_count": len(relations),
+        "generated_at": globe_data["generated_at"],
+        "source_coverage": coverage,
+        "note": "Editorial signals are not scientific proof of causal impact.",
+    }
 
 
 @app.get("/api/v1/signals")
