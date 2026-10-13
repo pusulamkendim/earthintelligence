@@ -12,6 +12,8 @@ from typing import Any
 
 def age_hours(when: str, now: datetime | None = None) -> float:
     now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     observed = datetime.fromisoformat(when.replace("Z", "+00:00"))
     if observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
@@ -97,6 +99,8 @@ def signals_for(events: list[dict[str, Any]], relations: list[dict[str, Any]],
 def globe_view(events: list[dict[str, Any]], relations: list[dict[str, Any]],
                limit: int = 2000, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     scored = [(event, priority(event, now)) for event in events]
     scored.sort(key=lambda pair: (-pair[1]["score"], pair[0]["id"]))
     features = [{
