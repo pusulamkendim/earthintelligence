@@ -52,3 +52,29 @@ Docker: docker build -t earth-intelligence . && docker run --rm -p 8000:8000 -v 
 - If you deploy publicly, restrict refresh token, rate-limit endpoints and monitor database volume. SQLite is intended for prototyping, not horizontal scaling.
 
 Attribution: [USGS](https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php), [NASA EONET](https://eonet.gsfc.nasa.gov/docs/v3), [Open-Meteo](https://open-meteo.com/en/docs).
+
+## Globe and Signal Engine (phase 2)
+
+Globe, live signals and Current Read are **deterministic and evidence-labeled**. They are not forecasts or proof that one disaster caused another.
+
+~~~bash
+curl -s 'http://127.0.0.1:8001/api/v1/globe?limit=1500' | python3 -c 'import json,sys; d=json.load(sys.stdin); print("Total:", d["total_observations"], "Features:",d["returned_features"]); print("Read:",d["current_read"]["text"]); print("Focus:",d["focus"]); print("Signals:",len(d["signals"]))'
+curl -s 'http://127.0.0.1:8001/api/v1/signals?limit=10' | python3 -m json.tool
+curl -s 'http://127.0.0.1:8001/api/v1/current-read' | python3 -m json.tool
+curl -s 'http://127.0.0.1:8001/api/v1/sources' | python3 -m json.tool
+~~~
+
+\`/api/v1/globe\` returns a ranked GeoJSON FeatureCollection, signal list, focus coordinate and concise Current Read. GeoJSON coordinates are always [longitude, latitude]. Priority is an **editorial** score; not a hazard index.
+
+\`/api/v1/signals\` includes recent earthquakes M5.0+ and conservative wildfire/storm **proximity** reports (within 300 km, 48 hours, with sufficiently recent observations). Most normal feeds may return **zero proximity signals**. No weather-driven influence is inferred yet; that requires additional, time-aligned meteorological evidence.
+
+Default source settings:
+
+- \`EARTH_REFRESH_SECONDS=300\`: USGS refresh and polling cadence.
+- \`EONET_REFRESH_SECONDS=1800\`: EONET refresh cadence (minimum 300 seconds).
+- \`EONET_LIMIT=2000\`: EONET per-request cap (between 300 and 5000).
+- If \`returned_raw >= requested_limit\`, \`/api/v1/sources\` reports \`possibly_truncated=true\`. This is a warning, not a completeness guarantee when below the requested limit.
+- Historical \`?as_of=<ISO timestamp>\` uses server-recorded snapshots. If the backend was not running at the requested time there is no historical snapshot to replay.
+
+EONET has **no documented offset pagination** for the event endpoint. This MVP increases the limit rather than inventing pagination. Event \`open\` status and dated geometries are not reliable proof of ongoing physical activity. Source metadata remains visible in the APIs.
+
