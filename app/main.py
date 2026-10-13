@@ -188,7 +188,7 @@ class Store:
         return fetched
 
     def read(self, as_of: datetime | None = None) -> list[dict[str, Any]]:
-        cutoff = as_of.astimezone(UTC).isoformat() if as_of else now_iso()
+        cutoff = (as_of.replace(tzinfo=UTC) if as_of.tzinfo is None else as_of).astimezone(UTC).isoformat() if as_of else now_iso()
         query = """SELECT o.payload FROM observations o JOIN
            (SELECT source, MAX(fetched_at) AS newest FROM batches WHERE fetched_at <= ? GROUP BY source) b
            ON o.source=b.source AND o.fetched_at=b.newest"""
