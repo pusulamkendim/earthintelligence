@@ -1,0 +1,1 @@
+# Earth Intelligence backend package
