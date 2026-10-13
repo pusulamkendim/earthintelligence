@@ -52,3 +52,16 @@ Docker: docker build -t earth-intelligence . && docker run --rm -p 8000:8000 -v 
 - If you deploy publicly, restrict refresh token, rate-limit endpoints and monitor database volume. SQLite is intended for prototyping, not horizontal scaling.
 
 Attribution: [USGS](https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php), [NASA EONET](https://eonet.gsfc.nasa.gov/docs/v3), [Open-Meteo](https://open-meteo.com/en/docs).
+
+## Live cosmic alerts (NASA GCN)
+
+The optional `example.py` consumer listens to the GCN topics for IceCube, CHIME, LIGO/Virgo/KAGRA, and other astronomical transients. It is a **terminal prototype only** and does not yet write to the Earth Intelligence database/API.
+
+~~~bash
+pip install -r requirements-gcn.txt
+cp .env.example .env
+# Edit .env locally, filling in your NASA GCN client ID and client secret.
+python example.py
+~~~
+
+Create credentials at https://gcn.nasa.gov/quickstart. Never commit `.env`, actual credentials, or raw Kafka output containing secrets. Heartbeats are ignored; large FITS/base64 skymaps are omitted from terminal summaries. Alerts identified as IGWN mock/MDC events are labeled `is_test: true`; all alerts require scientific verification before being treated as confirmed astrophysical events.
