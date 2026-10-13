@@ -14,12 +14,15 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from app.signals import globe_view, signals_for
 
 UTC = timezone.utc
 USGS_URL = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson"
 EONET_URL = "https://eonet.gsfc.nasa.gov/api/v3/events"
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 REFRESH_SECONDS = max(60, int(os.getenv("EARTH_REFRESH_SECONDS", "300")))
+EONET_REFRESH_SECONDS = max(300, int(os.getenv("EONET_REFRESH_SECONDS", "1800")))
+EONET_LIMIT = min(5000, max(300, int(os.getenv("EONET_LIMIT", "2000"))))
 DB_PATH = os.getenv("EARTH_DB_PATH", "data/earth.db")
 REFRESH_TOKEN = os.getenv("EARTH_REFRESH_TOKEN", "")
 SOURCES = {
@@ -185,7 +188,7 @@ class Store:
         return fetched
 
     def read(self, as_of: datetime | None = None) -> list[dict[str, Any]]:
-        cutoff = as_of.astimezone(UTC).isoformat() if as_of else now_iso()
+        cutoff = (as_of.replace(tzinfo=UTC) if as_of.tzinfo is None else as_of).astimezone(UTC).isoformat() if as_of else now_iso()
         query = """SELECT o.payload FROM observations o JOIN
            (SELECT source, MAX(fetched_at) AS newest FROM batches WHERE fetched_at <= ? GROUP BY source) b
            ON o.source=b.source AND o.fetched_at=b.newest"""
@@ -203,10 +206,14 @@ class Store:
 store: Store | None = None
 client: httpx.AsyncClient | None = None
 errors: dict[str, str | None] = {"usgs": None, "eonet": None}
+coverage: dict[str, dict[str, Any]] = {
+    "usgs": {"feed": "M2.5+ earthquakes in last 24 hours"},
+    "eonet": {"status": "not_loaded", "requested_limit": EONET_LIMIT},
+}
 refresh_lock = asyncio.Lock()
 
 
-async def refresh() -> dict[str, Any]:
+async def refresh(force: bool = False) -> dict[str, Any]:
     if client is None or store is None:
         raise RuntimeError("Application not initialized")
     async with refresh_lock:
@@ -214,7 +221,16 @@ async def refresh() -> dict[str, Any]:
             try:
                 response = await client.get(url, params=params)
                 response.raise_for_status()
-                events = normalizer(response.json())
+                payload = response.json()
+                if source == "eonet":
+                    raw_count = len(payload.get("events", []))
+                    coverage["eonet"] = {
+                        "status": "possibly_limited" if raw_count >= EONET_LIMIT else "within_requested_limit",
+                        "requested_limit": EONET_LIMIT, "returned_raw": raw_count,
+                        "possibly_truncated": raw_count >= EONET_LIMIT,
+                        "note": "EONET open status and source dates do not guarantee current physical activity.",
+                    }
+                events = normalizer(payload)
                 fetched = store.put(source, events)
                 errors[source] = None
                 return {"source": source, "count": len(events), "fetched_at": fetched, "status": "ok"}
@@ -222,10 +238,19 @@ async def refresh() -> dict[str, Any]:
                 errors[source] = str(exc)[:250]
                 return {"source": source, "status": "error", "error": errors[source]}
 
-        results = await asyncio.gather(
-            fetch("usgs", USGS_URL, None, normalize_usgs),
-            fetch("eonet", EONET_URL, {"status": "open", "category": "wildfires,severeStorms", "limit": 300}, normalize_eonet),
-        )
+        last = store.source_times().get("eonet", {}).get("last_success")
+        eonet_due = force or not last or (
+            datetime.now(UTC) - parse_date(last)
+        ).total_seconds() >= EONET_REFRESH_SECONDS
+        tasks = [fetch("usgs", USGS_URL, None, normalize_usgs)]
+        if eonet_due:
+            tasks.append(fetch("eonet", EONET_URL, {
+                "status": "open", "category": "wildfires,severeStorms",
+                "limit": EONET_LIMIT}, normalize_eonet))
+        results = await asyncio.gather(*tasks)
+        if not eonet_due:
+            results.append({"source": "eonet", "status": "skipped",
+                            "reason": "refresh_interval", "interval_seconds": EONET_REFRESH_SECONDS})
         return {"sources": results}
 
 
@@ -239,7 +264,7 @@ async def polling() -> None:
 async def lifespan(_app: FastAPI):
     global client, store
     store = Store(DB_PATH)
-    async with httpx.AsyncClient(timeout=12, headers={"User-Agent": "EarthIntelligence-MVP/0.1 (+public-data)"}) as http:
+    async with httpx.AsyncClient(timeout=25, headers={"User-Agent": "EarthIntelligence-MVP/0.1 (+public-data)"}) as http:
         client = http
         await refresh()
         task = asyncio.create_task(polling())
@@ -273,7 +298,8 @@ def health():
 @app.get("/api/v1/sources")
 def sources():
     times = active_store().source_times()
-    return {name: {**meta, **times.get(name, {}), "last_error": errors.get(name)} for name, meta in SOURCES.items()}
+    return {name: {**meta, **times.get(name, {}), "last_error": errors.get(name),
+                   "coverage": coverage.get(name, {})} for name, meta in SOURCES.items()}
 
 
 def selected_events(as_of: datetime | None, kind: str | None, limit: int) -> list[dict[str, Any]]:
@@ -308,7 +334,39 @@ def relations(radius_km: float = Query(600, ge=1, le=2000), max_hours: int = Que
 @app.get("/api/v1/current-read")
 def current_read(as_of: datetime | None = None):
     all_events = active_store().read(as_of)
-    return make_read(all_events, find_relations(all_events))
+    relations = find_relations(all_events, radius_km=300, max_hours=48)
+    globe_data = globe_view(all_events, relations, limit=1, now=as_of)
+    return {
+        **globe_data["current_read"],
+        "counts": globe_data["counts"],
+        "relation_count": len(relations),
+        "generated_at": globe_data["generated_at"],
+        "source_coverage": coverage,
+        "note": "Editorial signals are not scientific proof of causal impact.",
+    }
+
+
+@app.get("/api/v1/signals")
+def signals(limit: int = Query(30, ge=1, le=100), as_of: datetime | None = None):
+    all_events = active_store().read(as_of)
+    matches = find_relations(all_events, radius_km=300, max_hours=48)
+    result = signals_for(all_events, matches, now=as_of)
+    return {"count": len(result), "signals": result[:limit],
+            "evidence_policy": "No causality inferred from proximity alone."}
+
+
+@app.get("/api/v1/globe")
+def globe(limit: int = Query(2000, ge=1, le=5000), as_of: datetime | None = None):
+    all_events = active_store().read(as_of)
+    matches = find_relations(all_events, radius_km=300, max_hours=48)
+    view = globe_view(all_events, matches, limit=limit, now=as_of)
+    view["sources"] = {
+        name: {**details, **active_store().source_times().get(name, {}),
+               "coverage": coverage.get(name, {})}
+        for name, details in SOURCES.items()
+    }
+    view["as_of"] = as_of
+    return view
 
 
 @app.get("/api/v1/timeline/{event_id:path}")
@@ -341,4 +399,4 @@ async def weather(lat: float = Query(..., ge=-90, le=90), lon: float = Query(...
 async def refresh_now(x_refresh_token: str | None = Header(None)):
     if not REFRESH_TOKEN or x_refresh_token != REFRESH_TOKEN:
         raise HTTPException(403, "Set EARTH_REFRESH_TOKEN and supply X-Refresh-Token")
-    return await refresh()
+    return await refresh(force=True)
